@@ -5,7 +5,13 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "league-prefix": "node src/getLeaguePrefix.js"
+    "league-prefix": "node src/getLeaguePrefix.js",
+    "normalize": "node src/normalizeSnapshot.js",
+    "advice-context": "node src/buildAdviceContext.js",
+    "web-context": "node src/fetchWebContext.js",
+    "advice-pipeline": "node src/normalizeSnapshot.js && node src/buildAdviceContext.js && node src/fetchWebContext.js",
+    "advise": "node src/runAdvise.js",
+    "daily": "node src/runAdvise.js --refresh"
   },
   "repository": {
     "type": "git",
@@ -17,6 +23,6 @@
   "dependencies": {
     "axios": "1.14.0",
     "qs": "6.15.0",
-    "xml2json": "0.12.0"
+    "fast-xml-parser": "5.2.5"
   }
 }

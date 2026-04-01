@@ -1,8 +1,54 @@
 const fs = require("fs");
 const qs = require("qs");
 const axios = require("axios");
-const parser = require("xml2json");
+const { XMLParser } = require("fast-xml-parser");
+const xmlParser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: "@_",
+  trimValues: true,
+  parseTagValue: true,
+});
 const CONFIG = require("../config.json");
+
+function ensureArray(x) {
+  if (x === undefined || x === null) return [];
+  return Array.isArray(x) ? x : [x];
+}
+
+function extractPercentOwnedFromPlayerNode(p) {
+  if (!p) return null;
+  const po = p.percent_owned;
+  if (po != null && typeof po === "object" && po.value !== undefined && po.value !== "") {
+    const n = Number(po.value);
+    return Number.isFinite(n) ? n : null;
+  }
+  if (p.ownership != null && typeof p.ownership === "object" && p.ownership.value !== undefined && p.ownership.value !== "") {
+    const n = Number(p.ownership.value);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+/** Yahoo aggregate draft / ADP-style fields (not your league's actual pick). */
+function extractDraftAnalysisFromPlayerNode(p) {
+  const da = p?.draft_analysis;
+  if (!da || typeof da !== "object") return null;
+  const num = (x) => {
+    if (x === undefined || x === null || x === "") return null;
+    const n = Number(x);
+    return Number.isFinite(n) ? n : null;
+  };
+  const out = {
+    average_pick: num(da.average_pick),
+    average_round: num(da.average_round),
+    average_cost: num(da.average_cost),
+    percent_drafted: num(da.percent_drafted),
+  };
+  if (out.average_pick == null && out.average_round == null && out.average_cost == null && out.percent_drafted == null) {
+    return null;
+  }
+  return out;
+}
 
 exports.yfbb = {
   // Global credentials variable
@@ -47,6 +93,9 @@ exports.yfbb = {
   },
   roster() {
     return `${this.YAHOO}/team/${CONFIG.LEAGUE_KEY}.t.${CONFIG.TEAM}/roster/players`;
+  },
+  leagueTeams() {
+    return `${this.YAHOO}/league/${CONFIG.LEAGUE_KEY}/teams`;
   },
 
   // Write to an external file to display output data
@@ -142,7 +191,7 @@ exports.yfbb = {
           "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/72.0.3626.109 Safari/537.36",
         },
       });
-      const jsonData = JSON.parse(parser.toJson(response.data));
+      const jsonData = xmlParser.parse(response.data);
       return jsonData;
     } catch (err) {
       if (err.response.data && err.response.data.error && err.response.data.error.description && err.response.data.error.description.includes("token_expired")) {
@@ -306,5 +355,96 @@ exports.yfbb = {
       console.error(`Error in getCurrentRoster(): ${err}`);
       return err;
     }
+  },
+
+  /**
+   * Every team in the league + current roster players (for trade suggestions).
+   * One Yahoo request per team after the team list; small delay between calls.
+   */
+  async getLeagueTeamsWithRosters() {
+    const delayMs = (() => {
+      const v = CONFIG.ROSTER_FETCH_DELAY_MS;
+      const n = typeof v === "string" ? parseInt(v, 10) : v;
+      return Number.isFinite(n) && n >= 0 ? n : 200;
+    })();
+    try {
+      const result = await this.makeAPIrequest(this.leagueTeams());
+      if (!result || !result.fantasy_content || !result.fantasy_content.league) {
+        console.error("getLeagueTeamsWithRosters: unexpected teams response");
+        return [];
+      }
+      const teams = ensureArray(result.fantasy_content.league.teams?.team);
+      const myTeamKey = `${CONFIG.LEAGUE_KEY}.t.${CONFIG.TEAM}`;
+      const out = [];
+      for (let i = 0; i < teams.length; i++) {
+        const t = teams[i];
+        const teamKey = t.team_key;
+        if (!teamKey) continue;
+        if (i > 0 && delayMs > 0) {
+          await new Promise((r) => setTimeout(r, delayMs));
+        }
+        const rosterRes = await this.makeAPIrequest(`${this.YAHOO}/team/${teamKey}/roster/players`);
+        const playersRaw = ensureArray(rosterRes?.fantasy_content?.team?.roster?.players?.player);
+        const players = playersRaw.map((p) => ({
+          player_key: p.player_key,
+          name: p.name?.full || [p.name?.first, p.name?.last].filter(Boolean).join(" "),
+          display_position: p.display_position,
+          team_abbr: p.editorial_team_abbr,
+          position_type: p.position_type,
+        }));
+        out.push({
+          team_key: teamKey,
+          team_id: t.team_id,
+          name: t.name,
+          url: t.url,
+          is_my_team: teamKey === myTeamKey,
+          players,
+        });
+      }
+      return out;
+    } catch (err) {
+      console.error(`Error in getLeagueTeamsWithRosters(): ${err}`);
+      return [];
+    }
+  },
+
+  /**
+   * `percent_owned` + `draft_analysis` in one batched players call (see Yahoo
+   * players subresources: https://yahoo-fantasy-node-docs.vercel.app/collection/players/teams ).
+   * draft_analysis is Yahoo-wide aggregate (ADP-style), not necessarily this league's draft slot.
+   */
+  async getPlayersMarketExtras(playerKeys) {
+    const unique = [...new Set(playerKeys)].filter(Boolean);
+    const CHUNK = 25;
+    const delayMs = (() => {
+      const v = CONFIG.PERCENT_OWNED_CHUNK_DELAY_MS;
+      const n = typeof v === "string" ? parseInt(v, 10) : v;
+      return Number.isFinite(n) && n >= 0 ? n : 120;
+    })();
+    const percent_owned_map = {};
+    const draft_analysis_map = {};
+    try {
+      for (let i = 0; i < unique.length; i += CHUNK) {
+        if (i > 0 && delayMs > 0) {
+          await new Promise((r) => setTimeout(r, delayMs));
+        }
+        const chunk = unique.slice(i, i + CHUNK);
+        const url = `${this.YAHOO}/players;player_keys=${chunk.join(",")};out=percent_owned,draft_analysis`;
+        const result = await this.makeAPIrequest(url);
+        if (!result || !result.fantasy_content) continue;
+        const players = ensureArray(result.fantasy_content.players?.player);
+        for (const p of players) {
+          const pk = p.player_key;
+          if (!pk) continue;
+          const pct = extractPercentOwnedFromPlayerNode(p);
+          if (pct != null) percent_owned_map[pk] = pct;
+          const da = extractDraftAnalysisFromPlayerNode(p);
+          if (da != null) draft_analysis_map[pk] = da;
+        }
+      }
+    } catch (err) {
+      console.error(`Error in getPlayersMarketExtras(): ${err}`);
+    }
+    return { percent_owned_map, draft_analysis_map };
   },
 };

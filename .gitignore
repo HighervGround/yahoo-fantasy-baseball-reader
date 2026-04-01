@@ -1,4 +1,8 @@
 node_modules/
 credentials.json
 allMyData.json
+snapshot.normalized.json
+advice-context.json
+web-context.json
+advice.md
 config.json

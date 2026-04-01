@@ -1,5 +1,34 @@
 const fs = require("fs");
 const yahoo = require("./yahooFantasyBaseball");
+const CONFIG = require("../config.json");
+
+function fetchLeagueRosters() {
+  const v = CONFIG.FETCH_LEAGUE_ROSTERS;
+  if (v === false || v === "0" || v === 0) return false;
+  return true;
+}
+
+function fetchPercentOwned() {
+  const v = CONFIG.FETCH_PERCENT_OWNED;
+  if (v === false || v === "0" || v === 0) return false;
+  return true;
+}
+
+function collectPlayerKeysForOwnership(freeAgents, myPlayers, leagueTeams) {
+  const s = new Set();
+  for (const p of freeAgents || []) {
+    if (p && p.player_key) s.add(p.player_key);
+  }
+  for (const p of myPlayers || []) {
+    if (p && p.player_key) s.add(p.player_key);
+  }
+  for (const tm of leagueTeams || []) {
+    for (const p of tm.players || []) {
+      if (p && p.player_key) s.add(p.player_key);
+    }
+  }
+  return [...s];
+}
 
 const getData = async () => {
   try {
@@ -32,6 +61,22 @@ const getData = async () => {
       const transactions = await yahoo.yfbb.getTransactions();
       console.log(`Getting a list of transactions...`);
 
+      let leagueTeams = [];
+      if (fetchLeagueRosters()) {
+        console.log(`Getting league rosters (all teams, for trades)...`);
+        leagueTeams = await yahoo.yfbb.getLeagueTeamsWithRosters();
+      }
+
+      let percentOwnedMap = {};
+      let draftAnalysisMap = {};
+      if (fetchPercentOwned()) {
+        const keys = collectPlayerKeysForOwnership(freeAgents, myPlayers, leagueTeams);
+        console.log(`Getting percent_owned + draft_analysis for ${keys.length} players...`);
+        const extras = await yahoo.yfbb.getPlayersMarketExtras(keys);
+        percentOwnedMap = extras.percent_owned_map || {};
+        draftAnalysisMap = extras.draft_analysis_map || {};
+      }
+
       const allData = {
         "free agents": freeAgents,
         "my players": myPlayers,
@@ -40,6 +85,9 @@ const getData = async () => {
         "stat IDs": statsIDs,
         "current roster": currentRoster,
         transactions,
+        "league teams": leagueTeams,
+        percent_owned_map: percentOwnedMap,
+        draft_analysis_map: draftAnalysisMap,
       };
 
       const data = JSON.stringify(allData);

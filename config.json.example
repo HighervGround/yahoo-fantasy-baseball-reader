@@ -5,5 +5,24 @@
     "LEAGUE_KEY" : "===.l.=====",
     "TEAM" : "1",
     "AUTH_FILE" : "./credentials.json",
-    "FREE_AGENTS": "3"
+    "FREE_AGENTS": "3",
+
+    "FETCH_LEAGUE_ROSTERS": true,
+    "ROSTER_FETCH_DELAY_MS": 200,
+
+    "FETCH_PERCENT_OWNED": true,
+    "PERCENT_OWNED_CHUNK_DELAY_MS": 120,
+
+    "TAVILY_API_KEY": "",
+    "ADVICE_FA_LIMIT": 20,
+    "WEB_SEARCH_MAX_PLAYERS": 28,
+    "WEB_SEARCH_DELAY_MS": 450,
+
+    "OPENROUTER_API_KEY": "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",
+    "OPENROUTER_MODEL": "openai/gpt-4o-mini",
+    "OPENROUTER_HTTP_REFERER": "http://localhost",
+    "OPENROUTER_APP_TITLE": "yahoo-fantasy-baseball-reader",
+
+    "OPENAI_API_KEY": "",
+    "OPENAI_MODEL": "gpt-4o-mini"
 }
