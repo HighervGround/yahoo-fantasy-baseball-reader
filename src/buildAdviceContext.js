@@ -1,5 +1,6 @@
 const fs = require("fs");
 const { loadRootConfig, teamKeyFromConfig, parseInOut, readJsonFile } = require("./pipelineUtil");
+const { getEasternYmd, getEasternDisplayDate } = require("./easternTime");
 
 function num(cfgVal, envVal, fallback) {
   const n = envVal !== undefined && envVal !== "" ? Number(envVal) : Number(cfgVal);
@@ -77,6 +78,52 @@ function slimPitcherForStreaming(p) {
   };
 }
 
+const BENCH_OR_RESERVE_SLOTS = new Set(["BN", "IL", "IL+", "NA", "NA+"]);
+
+function slimDropCandidateForStream(p) {
+  if (!p || !isPitcherRow(p)) return null;
+  const ss = p.season_stats;
+  return {
+    player_key: p.player_key,
+    name: p.name,
+    team_abbr: p.team_abbr,
+    team_name: p.team_name || null,
+    display_position: p.display_position,
+    selected_position: p.selected_position,
+    is_starting: p.is_starting,
+    percent_owned: p.percent_owned != null ? p.percent_owned : null,
+    season_stats_by_label: ss?.byLabel ?? null,
+  };
+}
+
+/** Roster SP/RP most plausible to cut when opening a spot for a streamer (bench/IL/low %). */
+function collectStreamingDropCandidates(myRoster, cap = 18) {
+  const pitchers = (myRoster || []).filter(isPitcherRow);
+  const isBenchLike = (p) => {
+    const slot = String(p.selected_position || "").toUpperCase();
+    return BENCH_OR_RESERVE_SLOTS.has(slot);
+  };
+  const bench = pitchers.filter(isBenchLike);
+  const active = pitchers.filter((p) => !isBenchLike(p));
+  const byLowPercent = (a, b) =>
+    (Number(a.percent_owned) || 999) - (Number(b.percent_owned) || 999);
+  bench.sort(byLowPercent);
+  active.sort(byLowPercent);
+  const marginalActive = active.slice(0, 6);
+  const ordered = [...bench, ...marginalActive];
+  const seen = new Set();
+  const out = [];
+  for (const p of ordered) {
+    const k = p.player_key || p.name;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    const row = slimDropCandidateForStream(p);
+    if (row) out.push(row);
+    if (out.length >= cap) break;
+  }
+  return out;
+}
+
 function buildAdviceContext(snapshot, cfg) {
   const myTeamKey = teamKeyFromConfig(cfg);
   const faLimit = num(cfg.ADVICE_FA_LIMIT, process.env.ADVICE_FA_LIMIT, 20);
@@ -86,17 +133,21 @@ function buildAdviceContext(snapshot, cfg) {
   const faSlice = (snapshot.free_agents || []).slice(0, Math.max(faLimit, streamFaLimit));
   const streaming_from_waiver = faSlice.map(slimPitcherForStreaming).filter(Boolean);
   const streaming_from_roster = (snapshot.my_roster || []).map(slimPitcherForStreaming).filter(Boolean);
+  const drop_candidates_for_stream = collectStreamingDropCandidates(snapshot.my_roster);
 
   const lineup_start_sit = (snapshot.my_roster || []).map(slimRosterRow).filter(Boolean);
+
+  const easternYmd = getEasternYmd();
+  const easternDisplay = getEasternDisplayDate();
 
   return {
     meta: {
       source: "yahoo-fantasy-baseball-reader",
-      advice_context_version: 3,
+      advice_context_version: 4,
       generated_at: new Date().toISOString(),
       team_key: myTeamKey,
       llm_note:
-        "Yahoo-only: roster slots in `lineup_start_sit`. `streaming_pitcher_pool` = SP/RP on you + extra FA arms for streamer research. `percent_owned` / `draft_analysis` as before. Matchup/weather/probable starters for games come from web_context (Tavily), not Yahoo.",
+        "Yahoo-only: roster slots in `lineup_start_sit`. `streaming_pitcher_pool` + `streaming_options` = SP/RP to hold, add from waivers, or drop to open a stream spot for **today (ET)** and **this H2H week**. Probables/two-start/matchups: web_context. `percent_owned` / `draft_analysis` as before.",
     },
     scoring: {
       stat_definitions: snapshot.scoring?.stat_definitions ?? [],
@@ -107,6 +158,20 @@ function buildAdviceContext(snapshot, cfg) {
     streaming_pitcher_pool: {
       from_my_roster: streaming_from_roster,
       from_waiver_wire: streaming_from_waiver,
+    },
+    streaming_options: {
+      intent:
+        "Streaming for **today (America/New_York)** and the **current H2H week**: use `from_waiver_wire` as ADD candidates, `drop_candidates_for_stream` as typical CUTS to free a roster spot, `from_my_roster` as arms you already own. Pair waiver adds with a drop from Yahoo JSON only.",
+      today_eastern_ymd: easternYmd,
+      today_eastern_display: easternDisplay,
+      fantasy_week: matchup
+        ? {
+            week: matchup.week,
+            week_start: matchup.week_start,
+            week_end: matchup.week_end,
+          }
+        : null,
+      drop_candidates_for_stream: drop_candidates_for_stream,
     },
     league_teams: snapshot.league_teams || [],
     matchup_this_week: matchup,

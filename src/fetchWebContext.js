@@ -1,6 +1,8 @@
 const fs = require("fs");
 const axios = require("axios");
 const { loadRootConfig, parseInOut, readJsonFile, getTavilyApiKey, sleep } = require("./pipelineUtil");
+const { getEasternYmd, getEasternDisplayDate, subtractCalendarDaysFromYmd } = require("./easternTime");
+const { fetchMlbScheduleForAdvice } = require("./mlbStatsApi");
 
 const TAVILY_SEARCH = "https://api.tavily.com/search";
 const SNIPPET_MAX = 700;
@@ -8,6 +10,13 @@ const SNIPPET_MAX = 700;
 function num(cfgVal, envVal, fallback) {
   const n = envVal !== undefined && envVal !== "" ? Number(envVal) : Number(cfgVal);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+function mlbStatsApiEnabled(cfg) {
+  const e = process.env.FETCH_MLB_STATS_API;
+  if (e === "0" || e === "false") return false;
+  if (cfg && cfg.FETCH_MLB_STATS_API === false) return false;
+  return true;
 }
 
 function collectPlayers(adviceContext, maxQueries) {
@@ -37,21 +46,28 @@ function collectStreamingTargets(advice, max) {
   const fa = pool.from_waiver_wire || [];
   const out = [];
   const seen = new Set();
-  for (const p of roster) {
+  const push = (p, role) => {
     const name = (p.name || "").trim();
-    if (!name || seen.has(name)) continue;
+    if (!name || seen.has(name)) return;
     seen.add(name);
-    out.push({ name, role: "streaming_roster_sp" });
-    if (out.length >= max) return out;
-  }
+    out.push({ name, role });
+  };
   for (const p of fa) {
     if (out.length >= max) break;
-    const name = (p.name || "").trim();
-    if (!name || seen.has(name)) continue;
-    seen.add(name);
-    out.push({ name, role: "streaming_fa_sp" });
+    push(p, "streaming_fa_sp");
+  }
+  for (const p of roster) {
+    if (out.length >= max) break;
+    push(p, "streaming_roster_sp");
   }
   return out;
+}
+
+function buildStreamingSearchQuery(m) {
+  const today = m.streamDatePhrase;
+  const week = m.streamWeekPhrase || "this fantasy baseball week";
+  return ({ name }) =>
+    `"${name}" MLB starting pitcher probable ${today} ${week} next start opponent two-start stream`;
 }
 
 function collectTeamsForWeather(advice, maxTeams) {
@@ -77,7 +93,7 @@ function trimSnippet(text) {
   return t.length <= SNIPPET_MAX ? t : `${t.slice(0, SNIPPET_MAX)}…`;
 }
 
-async function tavilySearch(apiKey, query, topic = "news") {
+async function tavilySearch(apiKey, query, topic = "news", extra = {}) {
   const { data } = await axios({
     method: "post",
     url: TAVILY_SEARCH,
@@ -89,6 +105,7 @@ async function tavilySearch(apiKey, query, topic = "news") {
       max_results: 4,
       topic,
       include_answer: false,
+      ...extra,
     },
     timeout: 45000,
   });
@@ -100,7 +117,7 @@ async function tavilySearch(apiKey, query, topic = "news") {
   return { results, response_time: data.response_time };
 }
 
-async function runSearchSeries(apiKey, items, buildQuery, label, delayMs, topic = "news") {
+async function runSearchSeries(apiKey, items, buildQuery, label, delayMs, topic = "news", tavilyExtra = {}) {
   const entries = [];
   let i = 0;
   for (const item of items) {
@@ -108,7 +125,7 @@ async function runSearchSeries(apiKey, items, buildQuery, label, delayMs, topic 
     const query = buildQuery(item);
     process.stderr.write(`[${label} ${i}/${items.length}] ${query.slice(0, 60)}… `);
     try {
-      const { results } = await tavilySearch(apiKey, query, topic);
+      const { results } = await tavilySearch(apiKey, query, topic, tavilyExtra);
       entries.push({ ...item, query, results });
       console.error(`ok (${results.length})`);
     } catch (err) {
@@ -142,15 +159,57 @@ async function main() {
 
   const advice = readJsonFile(inFile);
 
+  const easternYmd = getEasternYmd();
+  const easternDisplay = getEasternDisplayDate();
+  const playerNewsPublishedAfter = subtractCalendarDaysFromYmd(easternYmd, 5);
+
+  let mlb_schedule = null;
+  if (mlbStatsApiEnabled(cfg)) {
+    const baseUrl = process.env.MLB_STATS_API_BASE || cfg.MLB_STATS_API_BASE || "https://statsapi.mlb.com";
+    console.error("Fetching MLB Stats API (schedule / probables)…");
+    try {
+      mlb_schedule = await fetchMlbScheduleForAdvice(advice, {
+        easternYmd,
+        matchup: advice.matchup_this_week,
+        baseUrl,
+      });
+      console.error(
+        `MLB schedule ok (${mlb_schedule.game_count_returned} games, ${mlb_schedule.relevant_team_abbr.length} team abbrevs)`,
+      );
+    } catch (err) {
+      const msg = err.response?.data || err.message || String(err);
+      mlb_schedule = {
+        source: "mlb_stats_api",
+        error: typeof msg === "string" ? msg : JSON.stringify(msg),
+        games: [],
+        start_date: null,
+        end_date: null,
+        relevant_team_abbr: [],
+        game_count_returned: 0,
+      };
+      console.error(`MLB Stats API error: ${mlb_schedule.error}`);
+    }
+  }
+
   const players = collectPlayers(advice, maxPlayerQueries);
   const entries = await runSearchSeries(
     apiKey,
     players,
-    ({ name }) => `"${name}" MLB injury OR lineup OR starting OR news`,
+    ({ name }) =>
+      `"${name}" MLB baseball ${easternDisplay} injury lineup IL activation roster news`,
     "player",
     delayMs,
     "news",
+    { start_date: playerNewsPublishedAfter },
   );
+
+  const matchup = advice.matchup_this_week;
+  const streamWeekPhrase = matchup
+    ? `H2H week ${matchup.week ?? "?"} (${matchup.week_start || "?"}–${matchup.week_end || "?"})`
+    : "this H2H matchup week";
+  const streamDatePhrase = easternDisplay;
+  const streamTavilyStart = subtractCalendarDaysFromYmd(easternYmd, 5);
+  const streamQueryBuilder = buildStreamingSearchQuery({ streamDatePhrase, streamWeekPhrase });
 
   const streamTargets = collectStreamingTargets(advice, maxStreaming);
   const streaming_matchup_entries =
@@ -159,40 +218,57 @@ async function main() {
       : await runSearchSeries(
           apiKey,
           streamTargets,
-          ({ name }) =>
-            `"${name}" MLB starting pitcher next start probable opponent matchup two-start stream fantasy baseball`,
+          streamQueryBuilder,
           "stream",
           delayMs,
           "news",
+          { start_date: streamTavilyStart },
         );
 
   const weatherTeams = collectTeamsForWeather(advice, maxWeatherTeams);
+  const weatherDatePhrase = easternDisplay;
+  const weatherPublishedAfter = subtractCalendarDaysFromYmd(easternYmd, 3);
   const team_weather_entries =
     weatherTeams.length === 0
       ? []
       : await runSearchSeries(
           apiKey,
           weatherTeams,
-          ({ label }) => `${label} MLB ballpark weather forecast rain delay postponement this week`,
+          ({ label }) =>
+            `${label} MLB ballpark weather ${weatherDatePhrase} forecast rain delay postponement`,
           "weather",
           delayMs,
-          "general",
+          "news",
+          {
+            start_date: weatherPublishedAfter,
+          },
         );
 
   const payload = {
     meta: {
-      source: "tavily",
-      web_context_version: 2,
+      sources: ["tavily", ...(mlb_schedule ? ["mlb_stats_api"] : [])],
+      web_context_version: 4,
       generated_at: new Date().toISOString(),
       player_count: players.length,
+      player_news_eastern_ymd: easternYmd,
+      player_news_query_display: easternDisplay,
+      player_news_tavily_start_date: playerNewsPublishedAfter,
       streaming_query_count: streaming_matchup_entries.length,
       weather_team_count: team_weather_entries.length,
+      weather_query_eastern_ymd: easternYmd,
+      weather_query_display: weatherDatePhrase,
+      weather_tavily_start_date: weatherPublishedAfter,
+      streaming_query_eastern_ymd: easternYmd,
+      streaming_query_today_display: streamDatePhrase,
+      streaming_query_week_phrase: streamWeekPhrase,
+      streaming_tavily_start_date: streamTavilyStart,
       disclaimer:
-        "Snippets are from web search; verify before lineup/streaming decisions. Not official MLB or Yahoo data.",
+        "Tavily: cite URLs; verify claims. MLB block (mlb_schedule): official schedule/probables feed; listed probables and times can change — not guaranteed starters. Confirm in Yahoo / MLB before locking lineups.",
     },
     entries,
     streaming_matchup_entries,
     team_weather_entries,
+    mlb_schedule,
   };
 
   fs.writeFileSync(outFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");

@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Yahoo Fantasy — Advice dashboard</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Yahoo Fantasy Baseball — dashboard</h1>
+      <p class="sub" id="header-sub">Loading…</p>
+      <div class="banner" id="news-banner" hidden>
+        Player news uses Tavily results filtered from <strong id="news-start"></strong> (ET calendar) and queries anchored to <strong id="news-display"></strong>. Re-run
+        <code>npm run web-context</code> for fresh snippets.
+      </div>
+    </header>
+    <nav class="tabs" role="tablist">
+      <button type="button" class="active" data-tab="advice">Advice (LLM)</button>
+      <button type="button" data-tab="news">News digest</button>
+      <button type="button" data-tab="mlb">MLB schedule</button>
+      <button type="button" data-tab="stream">Streaming</button>
+      <button type="button" data-tab="weather">Weather</button>
+    </nav>
+    <main>
+      <section id="panel-advice" class="panel active" role="tabpanel">
+        <div id="advice-body" class="advice-md"></div>
+      </section>
+      <section id="panel-news" class="panel" role="tabpanel">
+        <div id="news-body" class="card-grid"></div>
+      </section>
+      <section id="panel-mlb" class="panel" role="tabpanel">
+        <div id="mlb-body"></div>
+      </section>
+      <section id="panel-stream" class="panel" role="tabpanel">
+        <div id="stream-body" class="card-grid"></div>
+      </section>
+      <section id="panel-weather" class="panel" role="tabpanel">
+        <div id="weather-body" class="card-grid"></div>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

@@ -22,11 +22,26 @@
     "WEB_WEATHER_TEAM_MAX": 10,
     "WEB_SEARCH_DELAY_MS": 450,
 
+    "FETCH_MLB_STATS_API": true,
+    "MLB_STATS_API_BASE": "https://statsapi.mlb.com",
+
     "OPENROUTER_API_KEY": "",
     "OPENROUTER_MODEL": "openai/gpt-4o-mini",
     "OPENROUTER_HTTP_REFERER": "http://localhost",
     "OPENROUTER_APP_TITLE": "yahoo-fantasy-baseball-reader",
 
     "OPENAI_API_KEY": "",
-    "OPENAI_MODEL": "gpt-4o-mini"
+    "OPENAI_MODEL": "gpt-4o-mini",
+
+    "LLM_MAX_STAT_LABELS": 24,
+    "LLM_MAX_FREE_AGENTS": 14,
+    "LLM_MAX_LEAGUE_TEAM_PLAYERS": 18,
+    "LLM_MAX_WEEK_STATS_LABELS": 22,
+    "LLM_MAX_WEB_PLAYER_ENTRIES": 18,
+    "LLM_MAX_WEB_STREAMING": 10,
+    "LLM_MAX_WEB_WEATHER": 8,
+    "LLM_MAX_WEB_RESULTS_PER_QUERY": 3,
+    "LLM_MAX_SNIPPET_CHARS": 260,
+    "LLM_MAX_STREAMING_DROP_CANDIDATES": 12,
+    "LLM_MAX_MLB_GAMES": 52
 }

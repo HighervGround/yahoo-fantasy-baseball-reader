@@ -3,6 +3,7 @@ const path = require("path");
 const { execSync } = require("child_process");
 const axios = require("axios");
 const { loadRootConfig, resolveLlm } = require("./pipelineUtil");
+const { slimAdviceForLlm, slimWebForLlm } = require("./slimForLlm");
 
 function parseArgs(argv) {
   const opts = {
@@ -32,7 +33,7 @@ const SYSTEM_PROMPT = `You are a Yahoo Fantasy Baseball assistant.
 
 Rules:
 1. All roster stats, scoring categories, free agent lists, head-to-head numbers, and **every player/team name in ADD / DROP / TRADE** MUST come only from the first JSON block (advice-context). Do not invent players or teams.
-2. **Waiver adds need a roster spot.** For every suggested add from \`free_agents\`, you must name exactly one **drop** from \`my_roster\` to release (same transaction in Yahoo). Do not recommend a bare add with no cut unless the JSON clearly shows an unfilled roster slot you can point to; if unsure, always pair add+drop.
+2. **Waiver adds need a roster spot.** For every suggested add from \`free_agents\`, you must name exactly one **drop** from \`my_roster\` to release (same transaction in Yahoo). Do not recommend a bare add with no cut unless the JSON clearly shows an unfilled roster slot you can point to; if unsure, always pair add+drop. The same applies to **streaming waiver adds**: pair each suggested streamer pickup with a **drop**, preferring names from \`streaming_options.drop_candidates_for_stream\` when they fit.
 3. **DROP** (stand-alone): only players listed under \`my_roster\`. Do not repeat the same drop you already paired with a waiver add unless you explain a second, separate move.
 4. For **TRADE**: 
    - Trades may be **any shape**: 1-for-1, 2-for-1, 3-for-2, etc. List **every** player on each side. Prefer a multi-player package when it better balances categories or roster construction.
@@ -43,8 +44,8 @@ Rules:
    - **Trade partner diversity:** Find this week's H2H opponent using \`meta.team_key\` and \`matchup_this_week.teams\` (the team in that matchup whose \`team_key\` is not yours). When you output **two** trade ideas, **at most one** may use that H2H opponent as **Trade partner**; the other **must** name a **different** fantasy team from \`league_teams\`. (One trade idea only: any valid partner is fine.) Do not default both trades to the weekly opponent out of habit.
    - **Trade realism — \`percent_owned\`:** Many players include \`percent_owned\` (Yahoo's league-wide **% rostered** in fantasy; tracks how managers value a player—similar idea to high **% Start** in the app). For **1-for-1** trades, **do not** suggest you give a low-\`percent_owned\` player and get a much higher one (e.g. single-digit vs ~90+) as a "fair" deal—no reasonable manager accepts that straight up. Either **add more value on your side** (extra players/picks narrative—still only names from JSON), or label the idea **Unlikely as a 1-for-1 — needs a sweetener / bigger package**, or pick a different target closer in \`percent_owned\`. Always show \`percent_owned\` in the write-up when the JSON has it. If missing, say the field was unavailable.
    - **\`draft_analysis\`:** When present (\`average_pick\`, \`average_round\`, \`average_cost\`, \`percent_drafted\`), it is Yahoo's **aggregate** draft snapshot (ADP-style), **not** "where they went in your league." Use it only as extra context for trade talk (e.g. perceived draft tier), not as this league's pick number.
-5. Injuries, lineups, probable pitchers, matchup/weather risk, and streaming angles MUST use the second JSON block (web-context): \`entries\` (player news), \`streaming_matchup_entries\` (probable / opponent / stream hints), \`team_weather_entries\` (ballpark weather). Cite URLs. Do not invent game matchups, probables, or weather without a cited snippet.
-6. **Start / sit:** Use \`lineup_start_sit\` / \`my_roster\` from file 1 for Yahoo slots (\`selected_position\`, \`is_starting\`, \`position_type\`). Tie recommendations to file 1 stats and file 2 context only.
+5. **Web / MLB context (file 2):** Use \`mlb_schedule\` when present for **scheduled games, opponents, venues, game dates, and MLB-listed probables** (still subject to late changes — say so). Use \`entries\` for injury/news (cite URLs). Use \`streaming_matchup_entries\` + \`team_weather_entries\` for extra narrative, matchup talk, and ballpark weather (cite URLs). Do not invent **dates, opponents, or probable starters** that contradict \`mlb_schedule\` when it lists them; do not invent weather without a cited snippet.
+6. **Start / sit:** Use \`my_roster\` from file 1 for Yahoo slots (\`selected_position\`, \`is_starting\`, \`position_type\`). Tie recommendations to file 1 stats and file 2 context only.
 7. If data is missing, say so clearly.
 8. Write in clear Markdown with headings. Be specific: use full player names exactly as in the JSON.
 9. Remind the reader that final moves must be made in the Yahoo Fantasy app.`;
@@ -54,7 +55,7 @@ function buildUserPrompt(adviceJson, webJson) {
 
 ---
 
-### FILE 1: advice-context.json (Yahoo — stats, rosters, league_teams for trades)
+### FILE 1: advice-context (Yahoo — slimmed for LLM; full JSON on disk may be larger)
 
 \`\`\`json
 ${adviceJson}
@@ -62,7 +63,7 @@ ${adviceJson}
 
 ---
 
-### FILE 2: web-context.json (Tavily: \`entries\` = player injury/lineup; \`streaming_matchup_entries\` = SP matchup/stream; \`team_weather_entries\` = ballpark weather — cite URLs)
+### FILE 2: web-context (Tavily + optional \`mlb_schedule\` from MLB Stats API — slimmed)
 
 \`\`\`json
 ${webJson}
@@ -100,22 +101,22 @@ Please produce these sections (use \`###\` headings in this order):
 ### This week (matchup)
 - Short read using \`matchup_this_week\` and \`week_stats_by_label\` only for category strength vs opponent.
 
-### Streaming pitchers
-- Focus on \`streaming_pitcher_pool\` in file 1 (your SP/RP + waiver SP/RP) and **\`streaming_matchup_entries\`** in file 2.
-- Name **2–4** stream candidates (prioritize waivers you could add + your bench arms). For each: next-start / opponent / park or matchup note **only** if supported by file 2 snippets; cite URL. Flag two-start week hints only if snippets say so.
-- If file 2 has no usable matchup data for someone, say so—do not guess probables.
+### Streaming pitchers (today + this H2H week)
+- Use **\`streaming_options\`** in file 1 for the ET “today” anchor, \`fantasy_week\` bounds, **\`drop_candidates_for_stream\`** (typical cuts), and the intent blurb. Use **\`streaming_pitcher_pool\`** for **\`from_waiver_wire\`** (adds) and **\`from_my_roster\`** (arms you already have).
+- Give **2–5** concrete **stream paths**. For **each path** that adds someone from waivers: **Add:** [from \`from_waiver_wire\` only] **Drop:** [from \`drop_candidates_for_stream\` or \`my_roster\` SP/RP only]. For same-roster streams (activate bench arm), say **Start / bench** without a waiver add.
+- Split advice between **games tonight / today (ET)** and the **rest of this fantasy week**. Prefer **\`mlb_schedule.games\`** for who plays whom and **listed probables** when available; use **\`streaming_matchup_entries\`** for news/context and cite URLs. Count **two-start** candidates only from games in \`mlb_schedule\` (same pitcher listed on two future dates) or when Tavily snippets explicitly support it—do not guess.
 
 ### Weather & postponement risk
 - Use **\`team_weather_entries\`** in file 2 for teams tied to your **starting** fantasy hitters/pitchers (from file 1). Summarize rain/delay/PPD risk; cite URLs.
 - If weather block is empty, say it was not fetched.
 
 ### Start / sit (lineup)
-- Use **\`lineup_start_sit\`** (or \`my_roster\`) in file 1: respect \`selected_position\`, \`position_type\`, \`is_starting\`, and \`season_stats.by_label\` where present.
-- For **each** ambiguous slot (e.g. two OFs for one OF spot, SP vs SP, Util), recommend **Start:** and **Sit:** using Yahoo stats from file 1, plus file 2 for probables, opponent quality, and weather when relevant (cite URLs).
-- Mention **favorable** or **tough** real-life matchups only when file 2 snippets support it (opponent offense/park/vegas-style reporting)—otherwise stick to season stats from Yahoo.
+- Use **\`my_roster\`** in file 1: respect \`selected_position\`, \`position_type\`, \`is_starting\`, and \`season_stats.by_label\` where present (slimmed payload may omit some fringe stat labels).
+- For **each** ambiguous slot (e.g. two OFs for one OF spot, SP vs SP, Util), recommend **Start:** and **Sit:** using Yahoo stats from file 1, plus file 2 for probables, opponent quality, and weather when relevant (cite URLs). If a stat is missing due to slimming, say so.
+- Mention **favorable** or **tough** real-life matchups when \`mlb_schedule\` shows the opposing team **or** file 2 snippets support it (opponent offense/park reporting)—otherwise stick to season stats from Yahoo.
 
 ### News digest
-- Bullets for your roster names where file 2 \`entries\` has relevant snippets (name, one line, URL).
+- Bullets for your roster names where file 2 \`entries\` has relevant snippets (name, one line, URL). Prefer **recent** items: queries are date-anchored and Tavily is filtered from \`meta.player_news_tavily_start_date\`; if snippets look stale, say so.
 
 End with a one-line disclaimer: not professional advice; confirm moves in the Yahoo app.`;
 }
@@ -132,7 +133,7 @@ async function callChatCompletions(llm, userContent) {
     data: {
       model: llm.model,
       temperature: 0.35,
-      max_tokens: 8192,
+      max_tokens: 6144,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: userContent },
@@ -187,11 +188,30 @@ Then run:
     process.exit(1);
   }
 
-  const adviceJson = fs.readFileSync(opts.adviceFile, "utf8");
-  const webJson = fs.readFileSync(opts.webFile, "utf8");
+  const adviceRaw = fs.readFileSync(opts.adviceFile, "utf8");
+  const webRaw = fs.readFileSync(opts.webFile, "utf8");
+
+  let adviceForPrompt;
+  let webForPrompt;
+  try {
+    const adviceObj = JSON.parse(adviceRaw);
+    const webObj = JSON.parse(webRaw);
+    const slimOpts = cfg;
+    const slimA = slimAdviceForLlm(adviceObj, slimOpts);
+    const slimW = slimWebForLlm(webObj, slimOpts);
+    adviceForPrompt = JSON.stringify(slimA);
+    webForPrompt = JSON.stringify(slimW);
+    console.error(
+      `LLM input slimmed: advice ${adviceForPrompt.length} chars (was ${adviceRaw.length}), web ${webForPrompt.length} chars (was ${webRaw.length})\n`,
+    );
+  } catch (e) {
+    console.error(`Failed to slim JSON (${e.message}); sending raw files (may exceed context).`);
+    adviceForPrompt = adviceRaw;
+    webForPrompt = webRaw;
+  }
 
   console.error(`Asking ${llm.provider} / ${llm.model}… (this may take a minute)\n`);
-  const markdown = await callChatCompletions(llm, buildUserPrompt(adviceJson, webJson));
+  const markdown = await callChatCompletions(llm, buildUserPrompt(adviceForPrompt, webForPrompt));
 
   const header = `<!-- Generated ${new Date().toISOString()} — ${llm.provider}:${llm.model} -->\n\n`;
   fs.writeFileSync(opts.outFile, header + markdown + "\n", "utf8");
