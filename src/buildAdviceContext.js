@@ -6,6 +6,13 @@ function num(cfgVal, envVal, fallback) {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
+function isPitcherRow(p) {
+  if (!p) return false;
+  if (p.position_type === "P") return true;
+  const pos = String(p.display_position || "").toUpperCase();
+  return /\b(SP|RP)\b/.test(pos) || pos === "P" || pos.includes("SP,") || pos.includes(",SP");
+}
+
 function slimRosterRow(p) {
   if (!p) return null;
   const ss = p.season_stats;
@@ -13,6 +20,8 @@ function slimRosterRow(p) {
     player_key: p.player_key,
     name: p.name,
     team_abbr: p.team_abbr,
+    team_name: p.team_name || null,
+    position_type: p.position_type || null,
     display_position: p.display_position,
     selected_position: p.selected_position,
     is_starting: p.is_starting,
@@ -34,6 +43,8 @@ function slimFaRow(p) {
     player_key: p.player_key,
     name: p.name,
     team_abbr: p.team_abbr,
+    team_name: p.team_name || null,
+    position_type: p.position_type || null,
     display_position: p.display_position,
     is_starting: p.is_starting,
     percent_owned: p.percent_owned != null ? p.percent_owned : null,
@@ -52,25 +63,51 @@ function findMyMatchup(matchups, myTeamKey) {
   return null;
 }
 
+function slimPitcherForStreaming(p) {
+  if (!p || !isPitcherRow(p)) return null;
+  const ss = p.season_stats;
+  return {
+    player_key: p.player_key,
+    name: p.name,
+    team_abbr: p.team_abbr,
+    team_name: p.team_name || null,
+    display_position: p.display_position,
+    percent_owned: p.percent_owned != null ? p.percent_owned : null,
+    season_stats_by_label: ss?.byLabel ?? null,
+  };
+}
+
 function buildAdviceContext(snapshot, cfg) {
   const myTeamKey = teamKeyFromConfig(cfg);
   const faLimit = num(cfg.ADVICE_FA_LIMIT, process.env.ADVICE_FA_LIMIT, 20);
+  const streamFaLimit = num(cfg.ADVICE_STREAMING_FA_CAP, process.env.ADVICE_STREAMING_FA_CAP, 35);
   const matchup = findMyMatchup(snapshot.matchups_this_week, myTeamKey);
+
+  const faSlice = (snapshot.free_agents || []).slice(0, Math.max(faLimit, streamFaLimit));
+  const streaming_from_waiver = faSlice.map(slimPitcherForStreaming).filter(Boolean);
+  const streaming_from_roster = (snapshot.my_roster || []).map(slimPitcherForStreaming).filter(Boolean);
+
+  const lineup_start_sit = (snapshot.my_roster || []).map(slimRosterRow).filter(Boolean);
 
   return {
     meta: {
       source: "yahoo-fantasy-baseball-reader",
-      advice_context_version: 2,
+      advice_context_version: 3,
       generated_at: new Date().toISOString(),
       team_key: myTeamKey,
       llm_note:
-        "Yahoo-only: `percent_owned` = league-wide % rostered (trade realism). `draft_analysis` = Yahoo aggregate ADP-style data (average_pick, average_round, etc.) — NOT necessarily this league's actual draft slot. league_teams = all rosters. web_context = injuries/news.",
+        "Yahoo-only: roster slots in `lineup_start_sit`. `streaming_pitcher_pool` = SP/RP on you + extra FA arms for streamer research. `percent_owned` / `draft_analysis` as before. Matchup/weather/probable starters for games come from web_context (Tavily), not Yahoo.",
     },
     scoring: {
       stat_definitions: snapshot.scoring?.stat_definitions ?? [],
     },
     my_roster: (snapshot.my_roster || []).map(slimRosterRow).filter(Boolean),
     free_agents: (snapshot.free_agents || []).slice(0, faLimit).map(slimFaRow).filter(Boolean),
+    lineup_start_sit,
+    streaming_pitcher_pool: {
+      from_my_roster: streaming_from_roster,
+      from_waiver_wire: streaming_from_waiver,
+    },
     league_teams: snapshot.league_teams || [],
     matchup_this_week: matchup,
   };

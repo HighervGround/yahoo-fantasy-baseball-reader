@@ -43,10 +43,11 @@ Rules:
    - **Trade partner diversity:** Find this week's H2H opponent using \`meta.team_key\` and \`matchup_this_week.teams\` (the team in that matchup whose \`team_key\` is not yours). When you output **two** trade ideas, **at most one** may use that H2H opponent as **Trade partner**; the other **must** name a **different** fantasy team from \`league_teams\`. (One trade idea only: any valid partner is fine.) Do not default both trades to the weekly opponent out of habit.
    - **Trade realism — \`percent_owned\`:** Many players include \`percent_owned\` (Yahoo's league-wide **% rostered** in fantasy; tracks how managers value a player—similar idea to high **% Start** in the app). For **1-for-1** trades, **do not** suggest you give a low-\`percent_owned\` player and get a much higher one (e.g. single-digit vs ~90+) as a "fair" deal—no reasonable manager accepts that straight up. Either **add more value on your side** (extra players/picks narrative—still only names from JSON), or label the idea **Unlikely as a 1-for-1 — needs a sweetener / bigger package**, or pick a different target closer in \`percent_owned\`. Always show \`percent_owned\` in the write-up when the JSON has it. If missing, say the field was unavailable.
    - **\`draft_analysis\`:** When present (\`average_pick\`, \`average_round\`, \`average_cost\`, \`percent_drafted\`), it is Yahoo's **aggregate** draft snapshot (ADP-style), **not** "where they went in your league." Use it only as extra context for trade talk (e.g. perceived draft tier), not as this league's pick number.
-5. Injuries, lineups, and breaking news MUST come only from the second JSON block (web-context). Cite the source URL when you use web info.
-6. If data is missing, say so clearly.
-7. Write in clear Markdown with headings. Be specific: use full player names exactly as in the JSON.
-8. Remind the reader that final moves must be made in the Yahoo Fantasy app.`;
+5. Injuries, lineups, probable pitchers, matchup/weather risk, and streaming angles MUST use the second JSON block (web-context): \`entries\` (player news), \`streaming_matchup_entries\` (probable / opponent / stream hints), \`team_weather_entries\` (ballpark weather). Cite URLs. Do not invent game matchups, probables, or weather without a cited snippet.
+6. **Start / sit:** Use \`lineup_start_sit\` / \`my_roster\` from file 1 for Yahoo slots (\`selected_position\`, \`is_starting\`, \`position_type\`). Tie recommendations to file 1 stats and file 2 context only.
+7. If data is missing, say so clearly.
+8. Write in clear Markdown with headings. Be specific: use full player names exactly as in the JSON.
+9. Remind the reader that final moves must be made in the Yahoo Fantasy app.`;
 
 function buildUserPrompt(adviceJson, webJson) {
   return `Below are two JSON documents from a local tool (already fetched).
@@ -61,7 +62,7 @@ ${adviceJson}
 
 ---
 
-### FILE 2: web-context.json (web search snippets — news/lineups/injuries only; cite URLs)
+### FILE 2: web-context.json (Tavily: \`entries\` = player injury/lineup; \`streaming_matchup_entries\` = SP matchup/stream; \`team_weather_entries\` = ballpark weather — cite URLs)
 
 \`\`\`json
 ${webJson}
@@ -99,8 +100,22 @@ Please produce these sections (use \`###\` headings in this order):
 ### This week (matchup)
 - Short read using \`matchup_this_week\` and \`week_stats_by_label\` only for category strength vs opponent.
 
+### Streaming pitchers
+- Focus on \`streaming_pitcher_pool\` in file 1 (your SP/RP + waiver SP/RP) and **\`streaming_matchup_entries\`** in file 2.
+- Name **2–4** stream candidates (prioritize waivers you could add + your bench arms). For each: next-start / opponent / park or matchup note **only** if supported by file 2 snippets; cite URL. Flag two-start week hints only if snippets say so.
+- If file 2 has no usable matchup data for someone, say so—do not guess probables.
+
+### Weather & postponement risk
+- Use **\`team_weather_entries\`** in file 2 for teams tied to your **starting** fantasy hitters/pitchers (from file 1). Summarize rain/delay/PPD risk; cite URLs.
+- If weather block is empty, say it was not fetched.
+
+### Start / sit (lineup)
+- Use **\`lineup_start_sit\`** (or \`my_roster\`) in file 1: respect \`selected_position\`, \`position_type\`, \`is_starting\`, and \`season_stats.by_label\` where present.
+- For **each** ambiguous slot (e.g. two OFs for one OF spot, SP vs SP, Util), recommend **Start:** and **Sit:** using Yahoo stats from file 1, plus file 2 for probables, opponent quality, and weather when relevant (cite URLs).
+- Mention **favorable** or **tough** real-life matchups only when file 2 snippets support it (opponent offense/park/vegas-style reporting)—otherwise stick to season stats from Yahoo.
+
 ### News digest
-- Bullets for your roster names where file 2 has relevant snippets (name, one line, URL).
+- Bullets for your roster names where file 2 \`entries\` has relevant snippets (name, one line, URL).
 
 End with a one-line disclaimer: not professional advice; confirm moves in the Yahoo app.`;
 }
@@ -117,7 +132,7 @@ async function callChatCompletions(llm, userContent) {
     data: {
       model: llm.model,
       temperature: 0.35,
-      max_tokens: 6144,
+      max_tokens: 8192,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: userContent },
