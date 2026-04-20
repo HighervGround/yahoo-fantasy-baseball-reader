@@ -22,7 +22,7 @@
   "author": "Edward Distel",
   "license": "ISC",
   "dependencies": {
-    "axios": "1.15.0",
+    "axios": "1.15.1",
     "fast-xml-parser": "5.7.1",
     "marked": "^18.0.1",
     "qs": "6.15.1"
